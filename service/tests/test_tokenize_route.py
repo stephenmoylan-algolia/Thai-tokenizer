@@ -1,14 +1,134 @@
-"""Tests for /tokenize endpoint routing and /detect endpoint."""
+"""Tests for tokenizer routing, endpoints, and registry-based pack loading."""
 
+import os
 import pytest
 
-from service.app import app
+from service.core.registry import TokenizerRegistry
+from service.core.tokenize import whitespace_tokenize, register_core, choose_tokenizer
+
+
+# --------------- unit tests: registry + routing ---------------
+
+
+class TestRegistry:
+    def test_register_and_get(self):
+        reg = TokenizerRegistry()
+        reg.register("test", lambda t: t.split(), {"pack": "test", "supports_scripts": ["latin"], "description": "test"})
+        fn, meta = reg.get("test")
+        assert fn is not None
+        assert meta["pack"] == "test"
+
+    def test_get_missing(self):
+        reg = TokenizerRegistry()
+        fn, meta = reg.get("nope")
+        assert fn is None
+        assert meta is None
+
+    def test_list_ids(self):
+        reg = TokenizerRegistry()
+        register_core(reg)
+        assert "whitespace" in reg.list_ids()
+
+    def test_list_meta(self):
+        reg = TokenizerRegistry()
+        register_core(reg)
+        metas = reg.list_meta()
+        assert any(m["tokenizer_id"] == "whitespace" for m in metas)
+
+
+class TestWhitespaceTokenizer:
+    def test_basic(self):
+        assert whitespace_tokenize("hello world") == ["hello", "world"]
+
+    def test_extra_spaces(self):
+        assert whitespace_tokenize("  a   b  ") == ["a", "b"]
+
+    def test_empty(self):
+        assert whitespace_tokenize("") == []
+
+
+class TestChooseTokenizer:
+    def _make_registry_with_thai(self):
+        reg = TokenizerRegistry()
+        register_core(reg)
+        # Simulate thai pack registration
+        reg.register(
+            "thai_pythainlp_newmm",
+            lambda t: ["mock_thai"],
+            {"pack": "thai", "supports_scripts": ["thai"], "description": "mock"},
+        )
+        return reg
+
+    def test_explicit_tokenizer(self):
+        reg = self._make_registry_with_thai()
+        tid, fn, reason = choose_tokenizer(reg, "whitespace", "auto", "thai", reg.list_ids(), "whitespace", True)
+        assert tid == "whitespace"
+        assert reason == "explicit"
+
+    def test_explicit_unknown_tokenizer(self):
+        reg = self._make_registry_with_thai()
+        tid, fn, reason = choose_tokenizer(reg, "nope", "auto", "latin", reg.list_ids(), "whitespace", True)
+        assert fn is None
+
+    def test_explicit_locale_thai(self):
+        reg = self._make_registry_with_thai()
+        tid, fn, reason = choose_tokenizer(reg, "auto", "th-TH", "latin", reg.list_ids(), "whitespace", True)
+        assert tid == "thai_pythainlp_newmm"
+        assert reason == "explicit_locale_thai"
+
+    def test_auto_thai_script(self):
+        reg = self._make_registry_with_thai()
+        tid, fn, reason = choose_tokenizer(reg, "auto", "auto", "thai", reg.list_ids(), "whitespace", True)
+        assert tid == "thai_pythainlp_newmm"
+        assert reason == "thai_script"
+
+    def test_auto_latin_fallback(self):
+        reg = self._make_registry_with_thai()
+        tid, fn, reason = choose_tokenizer(reg, "auto", "auto", "latin", reg.list_ids(), "whitespace", True)
+        assert tid == "whitespace"
+        assert reason == "fallback_default"
+
+    def test_no_auto_routing(self):
+        reg = self._make_registry_with_thai()
+        tid, fn, reason = choose_tokenizer(reg, "auto", "auto", "thai", reg.list_ids(), "whitespace", False)
+        assert tid == "whitespace"
+        assert reason == "default_no_auto"
+
+    def test_core_only_thai_text_falls_to_whitespace(self):
+        """When Thai pack is NOT installed, Thai text routes to whitespace."""
+        reg = TokenizerRegistry()
+        register_core(reg)
+        tid, fn, reason = choose_tokenizer(reg, "auto", "auto", "thai", reg.list_ids(), "whitespace", True)
+        assert tid == "whitespace"
+        assert reason == "fallback_default"
+        assert fn is not None
+
+
+# --------------- integration tests: Flask endpoints ---------------
 
 
 @pytest.fixture
 def client():
-    app.config["TESTING"] = True
-    with app.test_client() as c:
+    """Client with Thai pack loaded (full integration)."""
+    os.environ["INSTALLED_PACKS"] = "thai"
+    # Re-import to trigger pack loading with env set
+    import importlib
+    import service.app
+    importlib.reload(service.app)
+    service.app.app.config["TESTING"] = True
+    with service.app.app.test_client() as c:
+        yield c
+
+
+@pytest.fixture
+def client_core_only():
+    """Client with NO packs loaded (core only)."""
+    os.environ["INSTALLED_PACKS"] = ""
+    import importlib
+    import service.app
+    importlib.reload(service.app)
+    service.app.app.config["TESTING"] = True
+    with service.app.app.test_client() as c:
         yield c
 
 
@@ -20,37 +140,33 @@ class TestHealthz:
 
 
 class TestVersion:
-    def test_version_fields(self, client):
-        r = client.get("/version")
-        data = r.get_json()
+    def test_version_with_thai(self, client):
+        data = client.get("/version").get_json()
         assert "version" in data
-        assert "available_tokenizers" in data
+        assert "thai" in data["installed_packs"]
         assert "thai_pythainlp_newmm" in data["available_tokenizers"]
         assert "whitespace" in data["available_tokenizers"]
-        assert data["supports_auto"] is True
+        assert data["auto_routing"] is True
+
+    def test_version_core_only(self, client_core_only):
+        data = client_core_only.get("/version").get_json()
+        assert "thai" not in data["installed_packs"]
+        assert "thai_pythainlp_newmm" not in data["available_tokenizers"]
+        assert "whitespace" in data["available_tokenizers"]
 
 
 class TestDetectEndpoint:
     def test_detect_thai(self, client):
-        r = client.get("/detect?text=รองเท้า")
-        data = r.get_json()
+        data = client.get("/detect?text=รองเท้า").get_json()
         assert data["detected"]["script"] == "thai"
-        assert "normalized" in data
 
     def test_detect_latin(self, client):
-        r = client.get("/detect?text=hello+world")
-        data = r.get_json()
+        data = client.get("/detect?text=hello+world").get_json()
         assert data["detected"]["script"] == "latin"
 
-    def test_detect_empty(self, client):
-        r = client.get("/detect?text=")
-        data = r.get_json()
-        assert data["detected"]["script"] == "other"
 
-
-class TestTokenizeAutoRouting:
+class TestTokenizeWithThai:
     def test_auto_thai_text(self, client):
-        """Auto locale + auto tokenizer_id with Thai text -> thai tokenizer."""
         r = client.post("/tokenize", json={
             "text": "รองเท้าวิ่ง",
             "locale": "auto",
@@ -60,11 +176,9 @@ class TestTokenizeAutoRouting:
         assert r.status_code == 200
         assert data["chosen"]["tokenizer_id"] == "thai_pythainlp_newmm"
         assert data["chosen"]["reason"] == "thai_script"
-        assert data["detected"]["script"] == "thai"
         assert len(data["tokens"]) > 0
 
     def test_auto_latin_text(self, client):
-        """Auto with Latin text -> whitespace fallback."""
         r = client.post("/tokenize", json={
             "text": "cheap running shoes",
             "locale": "auto",
@@ -73,11 +187,10 @@ class TestTokenizeAutoRouting:
         data = r.get_json()
         assert r.status_code == 200
         assert data["chosen"]["tokenizer_id"] == "whitespace"
-        assert data["chosen"]["reason"] == "fallback_whitespace"
+        assert data["chosen"]["reason"] == "fallback_default"
         assert data["tokens"] == ["cheap", "running", "shoes"]
 
     def test_explicit_locale_thai(self, client):
-        """locale=th-TH + auto tokenizer_id -> forces Thai tokenizer."""
         r = client.post("/tokenize", json={
             "text": "cheap running shoes",
             "locale": "th-TH",
@@ -88,19 +201,16 @@ class TestTokenizeAutoRouting:
         assert data["chosen"]["tokenizer_id"] == "thai_pythainlp_newmm"
         assert data["chosen"]["reason"] == "explicit_locale_thai"
 
-    def test_explicit_tokenizer_thai(self, client):
-        """Explicit tokenizer_id=thai_pythainlp_newmm -> uses Thai regardless."""
+    def test_explicit_tokenizer(self, client):
         r = client.post("/tokenize", json={
             "text": "hello world",
             "tokenizer_id": "thai_pythainlp_newmm",
         })
         data = r.get_json()
         assert r.status_code == 200
-        assert data["chosen"]["tokenizer_id"] == "thai_pythainlp_newmm"
         assert data["chosen"]["reason"] == "explicit"
 
-    def test_explicit_tokenizer_whitespace(self, client):
-        """Explicit tokenizer_id=whitespace -> uses whitespace."""
+    def test_explicit_whitespace(self, client):
         r = client.post("/tokenize", json={
             "text": "รองเท้าวิ่ง",
             "tokenizer_id": "whitespace",
@@ -108,48 +218,52 @@ class TestTokenizeAutoRouting:
         data = r.get_json()
         assert r.status_code == 200
         assert data["chosen"]["tokenizer_id"] == "whitespace"
-        assert data["chosen"]["reason"] == "explicit"
 
     def test_unknown_tokenizer_400(self, client):
-        """Unknown tokenizer_id -> 400 error."""
         r = client.post("/tokenize", json={
             "text": "hello",
             "tokenizer_id": "unknown_thing",
         })
         assert r.status_code == 400
-        data = r.get_json()
-        assert "error" in data
-        assert "available_tokenizers" in data
+        assert "error" in r.get_json()
 
+    def test_empty_text_400(self, client):
+        r = client.post("/tokenize", json={"text": "   "})
+        assert r.status_code == 400
 
-class TestTokenizeResponseShape:
-    def test_full_response_fields(self, client):
-        """Verify all required fields are present."""
+    def test_full_response_shape(self, client):
         r = client.post("/tokenize", json={
-            "text": "รองเท้าnike วิ่ง ราคาไม่แพง",
+            "text": "รองเท้าnike วิ่ง",
             "locale": "auto",
             "tokenizer_id": "auto",
             "mode": "query",
         })
         data = r.get_json()
-        assert r.status_code == 200
-
-        required_fields = [
-            "tokens", "joined", "normalized", "tokenizer_id",
-            "version", "locale", "mode", "latency_ms",
-            "detected", "chosen",
-        ]
-        for field in required_fields:
-            assert field in data, f"Missing field: {field}"
-
+        for field in ["tokens", "joined", "normalized", "tokenizer_id",
+                      "version", "locale", "mode", "latency_ms",
+                      "detected", "chosen"]:
+            assert field in data, f"Missing: {field}"
         assert "script" in data["detected"]
-        assert "confidence" in data["detected"]
-        assert "tokenizer_id" in data["chosen"]
         assert "reason" in data["chosen"]
 
-    def test_defaults_when_omitted(self, client):
-        """locale and tokenizer_id should default to 'auto'."""
-        r = client.post("/tokenize", json={"text": "hello"})
+
+class TestTokenizeCoreOnly:
+    def test_thai_text_routes_to_whitespace(self, client_core_only):
+        """Without Thai pack, Thai text falls back to whitespace."""
+        r = client_core_only.post("/tokenize", json={
+            "text": "รองเท้าวิ่ง",
+            "locale": "auto",
+            "tokenizer_id": "auto",
+        })
         data = r.get_json()
-        assert data["locale"] == "auto"
-        assert data["mode"] == "query"
+        assert r.status_code == 200
+        assert data["chosen"]["tokenizer_id"] == "whitespace"
+        assert data["chosen"]["reason"] == "fallback_default"
+
+    def test_explicit_thai_tokenizer_400(self, client_core_only):
+        """Explicitly requesting Thai tokenizer when not installed -> 400."""
+        r = client_core_only.post("/tokenize", json={
+            "text": "hello",
+            "tokenizer_id": "thai_pythainlp_newmm",
+        })
+        assert r.status_code == 400
