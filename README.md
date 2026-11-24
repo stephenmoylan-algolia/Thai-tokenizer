@@ -154,18 +154,6 @@ INSTALLED_PACKS=thai python -m pytest service/tests/ -v
 
 41 tests covering: detection, normalisation, registry, routing logic, endpoint integration (with and without Thai pack).
 
-## Deploy to Railway
-
-Railway deploys from GitHub using nixpacks (not Docker). The `railway.toml` sets `INSTALLED_PACKS=thai` in the start command.
-
-1. Push repo to GitHub.
-2. Railway: **New Project -> Deploy from GitHub Repo -> select this repo**.
-3. Railway auto-detects `railway.toml` config.
-4. Optionally set env vars in Railway dashboard (`INSTALLED_PACKS`, `ENABLED_TOKENIZERS`, etc.).
-5. Test: `/healthz`, `/version`, `/tokenize`.
-
-For build-time packs via Docker, deploy via a Docker-compatible platform or Railway Dockerfile deployment with build args.
-
 ## Deploy to Cloudflare (Containers)
 
 The Flask service runs as a [Cloudflare Container](https://developers.cloudflare.com/containers/) built from the root `Dockerfile`. A thin Worker (`src/index.ts`) receives every request and proxies it to the container. Config is in `wrangler.jsonc`.
