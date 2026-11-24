@@ -17,6 +17,8 @@ def tokenize_thai(text: str) -> list[str]:
 
 def register(registry: TokenizerRegistry):
     """Register the Thai tokenizer in the given registry."""
+    # Load the newmm dictionary now rather than on the first request.
+    tokenize_thai("ทดสอบ")
     registry.register(
         tokenizer_id="thai_pythainlp_newmm",
         fn=tokenize_thai,

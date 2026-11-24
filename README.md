@@ -78,18 +78,18 @@ If Thai pack is not installed, Thai text falls back to whitespace.
 **Baseline (core only):**
 
 ```bash
-docker build -f service/Dockerfile -t tokenizer:core service/
+docker build --build-arg PACKS="" -t tokenizer:core .
 docker run -e PORT=8080 -p 8080:8080 tokenizer:core
 ```
 
 **Baseline + Thai pack:**
 
 ```bash
-docker build -f service/Dockerfile --build-arg PACKS="thai" -t tokenizer:thai service/
+docker build -t tokenizer:thai .
 docker run -e PORT=8080 -p 8080:8080 tokenizer:thai
 ```
 
-The `PACKS` build arg controls which language packs are installed at build time. The `INSTALLED_PACKS` env var tells the app which packs to load at startup.
+The Dockerfile lives at the repo root (build context = repo root). `PACKS` defaults to `thai`; it controls which language packs are installed at build time. The `INSTALLED_PACKS` env var tells the app which packs to load at startup.
 
 ## Local Run (development)
 
@@ -165,3 +165,23 @@ Railway deploys from GitHub using nixpacks (not Docker). The `railway.toml` sets
 5. Test: `/healthz`, `/version`, `/tokenize`.
 
 For build-time packs via Docker, deploy via a Docker-compatible platform or Railway Dockerfile deployment with build args.
+
+## Deploy to Cloudflare (Containers)
+
+The Flask service runs as a [Cloudflare Container](https://developers.cloudflare.com/containers/) built from the root `Dockerfile`. A thin Worker (`src/index.ts`) receives every request and proxies it to the container. Config is in `wrangler.jsonc`.
+
+Requirements: Workers **Paid** plan, Docker running locally (wrangler builds and pushes the image), Node.js **22+**.
+
+```bash
+npm install
+npx wrangler login
+npm run deploy          # wrangler deploy: builds image, pushes it, deploys the Worker
+```
+
+The first deploy can take a few minutes before the container is provisioned. Then hit `https://thai-tokenizer.<your-subdomain>.workers.dev/healthz`.
+
+- Container env vars (`INSTALLED_PACKS`, `AUTO_ROUTING`, ...) are set in `TokenizerContainer.envVars` in `src/index.ts`.
+- `sleepAfter` (default `10m`) controls when an idle container shuts down; the next request cold-starts it (a few seconds).
+- To scale out, raise `INSTANCE_COUNT` in `src/index.ts` (must be <= `max_instances` in `wrangler.jsonc`).
+- `npm run dev` runs it locally with `wrangler dev` (needs Docker).
+- After editing `wrangler.jsonc`, run `npm run cf-typegen` to refresh `worker-configuration.d.ts`.

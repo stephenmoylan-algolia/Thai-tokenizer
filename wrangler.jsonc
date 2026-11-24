@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "thai-tokenizer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "observability": { "enabled": true },
+
+  // The Flask service runs as a Cloudflare Container built from ./Dockerfile.
+  // The Worker in src/index.ts proxies every request to it.
+  "containers": [
+    {
+      "class_name": "TokenizerContainer",
+      "image": "./Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 3
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "TOKENIZER", "class_name": "TokenizerContainer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TokenizerContainer"] }]
+}
